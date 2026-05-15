@@ -1,5 +1,6 @@
 import { load } from 'cheerio';
 import { fetchApi } from '@libs/fetch';
+
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
 import { Filters, FilterTypes } from '@libs/filterInputs';
