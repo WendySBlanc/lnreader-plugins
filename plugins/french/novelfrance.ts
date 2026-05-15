@@ -41,6 +41,7 @@ type NFChapter = {
 type NFChaptersResponse = {
   chapters: NFChapter[];
   total: number;
+  take: number;
   hasMore: boolean;
 };
 
@@ -64,7 +65,7 @@ class NovelFrancePlugin implements Plugin.PluginBase {
   name = 'NovelFrance';
   icon = 'src/fr/novelfrance/icon.png';
   site = 'https://novelfrance.fr';
-  version = '1.1.0';
+  version = '1.2.0';
 
   private toNovelItem(novel: NFNovel): Plugin.NovelItem {
     return {
@@ -125,27 +126,52 @@ class NovelFrancePlugin implements Plugin.PluginBase {
     return novel;
   }
 
-  private async fetchAllChapters(slug: string): Promise<Plugin.ChapterItem[]> {
-    const chapters: Plugin.ChapterItem[] = [];
-    let page = 1;
-    let hasMore = true;
-
-    while (hasMore) {
+  private async fetchChapterPage(
+    slug: string,
+    page: number,
+  ): Promise<NFChaptersResponse | null> {
+    try {
       const r = await fetchApi(
-        `${this.site}/api/chapters/${slug}?page=${page}`,
+        `${this.site}/api/chapters/${slug}?page=${page}&take=100`,
       );
-      if (!r.ok) break;
-      const data: NFChaptersResponse = await r.json();
-      for (const ch of data.chapters) {
-        chapters.push({
-          name: ch.title || `Chapitre ${ch.chapterNumber}`,
-          path: `/novel/${slug}/${ch.slug}`,
-          chapterNumber: ch.chapterNumber,
-          releaseTime: ch.createdAt,
-        });
+      if (!r.ok) return null;
+      return (await r.json()) as NFChaptersResponse;
+    } catch {
+      return null;
+    }
+  }
+
+  private toChapterItem(slug: string, ch: NFChapter): Plugin.ChapterItem {
+    return {
+      name: ch.title || `Chapitre ${ch.chapterNumber}`,
+      path: `/novel/${slug}/${ch.slug}`,
+      chapterNumber: ch.chapterNumber,
+      releaseTime: ch.createdAt,
+    };
+  }
+
+  private async fetchAllChapters(slug: string): Promise<Plugin.ChapterItem[]> {
+    const first = await this.fetchChapterPage(slug, 1);
+    if (!first) return [];
+
+    const chapters: Plugin.ChapterItem[] = first.chapters.map(ch =>
+      this.toChapterItem(slug, ch),
+    );
+
+    if (first.hasMore) {
+      const pageSize = first.take || 100;
+      const totalPages = Math.ceil(first.total / pageSize);
+      const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+      const results = await Promise.all(
+        remaining.map(p => this.fetchChapterPage(slug, p)),
+      );
+      for (const data of results) {
+        if (data) {
+          for (const ch of data.chapters) {
+            chapters.push(this.toChapterItem(slug, ch));
+          }
+        }
       }
-      hasMore = data.hasMore;
-      page++;
     }
 
     chapters.sort((a, b) => (a.chapterNumber ?? 0) - (b.chapterNumber ?? 0));
