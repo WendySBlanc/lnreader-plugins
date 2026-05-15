@@ -65,7 +65,7 @@ class NovelFrancePlugin implements Plugin.PluginBase {
   name = 'NovelFrance';
   icon = 'src/fr/novelfrance/icon.png';
   site = 'https://novelfrance.fr';
-  version = '1.2.0';
+  version = '1.3.0';
 
   private toNovelItem(novel: NFNovel): Plugin.NovelItem {
     return {
@@ -128,11 +128,12 @@ class NovelFrancePlugin implements Plugin.PluginBase {
 
   private async fetchChapterPage(
     slug: string,
-    page: number,
+    skip: number,
+    take: number,
   ): Promise<NFChaptersResponse | null> {
     try {
       const r = await fetchApi(
-        `${this.site}/api/chapters/${slug}?page=${page}&take=100`,
+        `${this.site}/api/chapters/${slug}?skip=${skip}&take=${take}`,
       );
       if (!r.ok) return null;
       return (await r.json()) as NFChaptersResponse;
@@ -151,7 +152,8 @@ class NovelFrancePlugin implements Plugin.PluginBase {
   }
 
   private async fetchAllChapters(slug: string): Promise<Plugin.ChapterItem[]> {
-    const first = await this.fetchChapterPage(slug, 1);
+    const pageSize = 100;
+    const first = await this.fetchChapterPage(slug, 0, pageSize);
     if (!first) return [];
 
     const chapters: Plugin.ChapterItem[] = first.chapters.map(ch =>
@@ -159,11 +161,12 @@ class NovelFrancePlugin implements Plugin.PluginBase {
     );
 
     if (first.hasMore) {
-      const pageSize = first.take || 100;
-      const totalPages = Math.ceil(first.total / pageSize);
-      const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+      const skips: number[] = [];
+      for (let s = pageSize; s < first.total; s += pageSize) {
+        skips.push(s);
+      }
       const results = await Promise.all(
-        remaining.map(p => this.fetchChapterPage(slug, p)),
+        skips.map(s => this.fetchChapterPage(slug, s, pageSize)),
       );
       for (const data of results) {
         if (data) {
@@ -174,8 +177,14 @@ class NovelFrancePlugin implements Plugin.PluginBase {
       }
     }
 
-    chapters.sort((a, b) => (a.chapterNumber ?? 0) - (b.chapterNumber ?? 0));
-    return chapters;
+    const seen = new Set<string>();
+    const deduped = chapters.filter(c => {
+      if (seen.has(c.path)) return false;
+      seen.add(c.path);
+      return true;
+    });
+    deduped.sort((a, b) => (a.chapterNumber ?? 0) - (b.chapterNumber ?? 0));
+    return deduped;
   }
 
   async parseChapter(chapterPath: string): Promise<string> {
