@@ -1,0 +1,236 @@
+import { load } from 'cheerio';
+import { fetchApi } from '@libs/fetch';
+import { Plugin } from '@/types/plugin';
+import { NovelStatus } from '@libs/novelStatus';
+import { Filters, FilterTypes } from '@libs/filterInputs';
+import { defaultCover } from '@libs/defaultCover';
+
+type NFNovel = {
+  title: string;
+  slug: string;
+  description: string;
+  coverImage: string;
+  author: string;
+  translatorName: string | null;
+  status: 'ONGOING' | 'COMPLETED';
+  rating: number;
+  genres: { id: string; name: string; slug: string }[];
+};
+
+type NFSearchResponse = {
+  novels: NFNovel[];
+  total: number;
+  hasMore: boolean;
+};
+
+class NovelFrancePlugin implements Plugin.PluginBase {
+  id = 'novelfrance';
+  name = 'NovelFrance';
+  icon = 'src/fr/novelfrance/icon.png';
+  site = 'https://novelfrance.fr';
+  version = '1.0.0';
+
+  private toNovelItem(novel: NFNovel): Plugin.NovelItem {
+    return {
+      name: novel.title,
+      path: '/novel/' + novel.slug,
+      cover: novel.coverImage ? this.site + novel.coverImage : defaultCover,
+    };
+  }
+
+  async popularNovels(
+    pageNo: number,
+    {
+      showLatestNovels,
+      filters,
+    }: Plugin.PopularNovelsOptions<typeof this.filters>,
+  ): Promise<Plugin.NovelItem[]> {
+    const sort = showLatestNovels
+      ? 'latest'
+      : (filters?.sort?.value as string) ?? 'popular';
+    const genre = filters?.genre?.value as string | undefined;
+
+    const params = new URLSearchParams({ sort, page: String(pageNo) });
+    if (genre && genre !== 'all') params.set('genre', genre);
+
+    const r = await fetchApi(`${this.site}/browse?${params}`);
+    const $ = load(await r.text());
+    const novels: Plugin.NovelItem[] = [];
+
+    $('a[href^="/novel/"]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      if (/\/chapter-/.test(href)) return;
+      const img = $(el).find('img').first();
+      if (!img.length) return;
+      const title =
+        $(el).find('h3').text().trim() || img.attr('alt')?.trim() || '';
+      if (!title) return;
+      const src = img.attr('src') || img.attr('data-src') || '';
+      novels.push({
+        name: title,
+        path: href,
+        cover: src
+          ? src.startsWith('http')
+            ? src
+            : this.site + src
+          : defaultCover,
+      });
+    });
+
+    return novels;
+  }
+
+  async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
+    const slug = novelPath.replace('/novel/', '');
+
+    const apiRes = await fetchApi(`${this.site}/api/novels/${slug}`);
+    if (!apiRes.ok) throw new Error('Impossible de charger le roman');
+    const data: NFNovel = await apiRes.json();
+
+    let author = data.author || '';
+    if (data.translatorName) author += ` (Trad. ${data.translatorName})`;
+
+    const novel: Plugin.SourceNovel = {
+      path: novelPath,
+      name: data.title,
+      cover: data.coverImage ? this.site + data.coverImage : defaultCover,
+      summary: data.description,
+      author,
+      status:
+        data.status === 'ONGOING'
+          ? NovelStatus.Ongoing
+          : data.status === 'COMPLETED'
+            ? NovelStatus.Completed
+            : NovelStatus.Unknown,
+      genres: data.genres.map(g => g.name).join(', '),
+      rating: data.rating,
+    };
+
+    novel.chapters = await this.fetchAllChapters(novelPath);
+    return novel;
+  }
+
+  private async fetchAllChapters(
+    novelPath: string,
+  ): Promise<Plugin.ChapterItem[]> {
+    const { chapters, totalPages } = await this.fetchChapterPage(novelPath, 1);
+
+    if (totalPages > 1) {
+      const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
+      const pages = await Promise.all(
+        remaining.map(p => this.fetchChapterPage(novelPath, p)),
+      );
+      for (const page of pages) chapters.push(...page.chapters);
+    }
+
+    chapters.sort((a, b) => (a.chapterNumber ?? 0) - (b.chapterNumber ?? 0));
+    return chapters;
+  }
+
+  private async fetchChapterPage(
+    novelPath: string,
+    page: number,
+  ): Promise<{ chapters: Plugin.ChapterItem[]; totalPages: number }> {
+    const r = await fetchApi(`${this.site}${novelPath}?page=${page}`);
+    const $ = load(await r.text());
+    const chapters: Plugin.ChapterItem[] = [];
+
+    $(`a[href^="${novelPath}/chapter-"]`).each((_, el) => {
+      const href = $(el).attr('href') || '';
+      const name = $(el).text().trim();
+      if (!href || !name) return;
+      const match = href.match(/\/chapter-(\d+)/);
+      const chapterNumber = match ? parseInt(match[1]) : 0;
+      chapters.push({ name, path: href, chapterNumber });
+    });
+
+    let totalPages = 1;
+    $('a[href*="?page="]').each((_, el) => {
+      const href = $(el).attr('href') || '';
+      const m = href.match(/[?&]page=(\d+)/);
+      if (m) {
+        const p = parseInt(m[1]);
+        if (p > totalPages) totalPages = p;
+      }
+    });
+
+    return { chapters, totalPages };
+  }
+
+  async parseChapter(chapterPath: string): Promise<string> {
+    const r = await fetchApi(`${this.site}${chapterPath}`);
+    const $ = load(await r.text());
+
+    $('nav, header, footer, script, style').remove();
+
+    return (
+      $('#chapter-content').html() ||
+      $('.chapter-content').html() ||
+      $('[class*="chapter-content"]').first().html() ||
+      $('article').html() ||
+      ''
+    );
+  }
+
+  async searchNovels(
+    searchTerm: string,
+    pageNo: number,
+  ): Promise<Plugin.NovelItem[]> {
+    if (pageNo !== 1) return [];
+    const r = await fetchApi(
+      `${this.site}/api/search?q=${encodeURIComponent(searchTerm)}`,
+    );
+    if (!r.ok) return [];
+    const data: NFSearchResponse = await r.json();
+    return data.novels.map(n => this.toNovelItem(n));
+  }
+
+  filters = {
+    sort: {
+      type: FilterTypes.Picker,
+      label: 'Trier par',
+      value: 'popular',
+      options: [
+        { label: 'Plus populaires', value: 'popular' },
+        { label: 'Mieux notés', value: 'rating' },
+        { label: 'Nouveautés', value: 'new' },
+      ],
+    },
+    genre: {
+      type: FilterTypes.Picker,
+      label: 'Genre',
+      value: 'all',
+      options: [
+        { label: 'Tous', value: 'all' },
+        { label: 'Action', value: 'action' },
+        { label: 'Adulte', value: 'adulte' },
+        { label: 'Anti-Héros', value: 'anti-h-ros' },
+        { label: 'Arts Martiaux', value: 'arts-martiaux' },
+        { label: 'Aventure', value: 'aventure' },
+        { label: 'Comédie', value: 'com-die' },
+        { label: 'Drama', value: 'drama' },
+        { label: 'Ecchi', value: 'ecchi' },
+        { label: 'Fantaisie', value: 'fantaisie' },
+        { label: 'Harem', value: 'harem' },
+        { label: 'Horreur', value: 'horreur' },
+        { label: 'Mature', value: 'mature' },
+        { label: 'Mystère', value: 'myst-re' },
+        { label: 'Psychologique', value: 'psychologique' },
+        { label: 'Réincarnation', value: 'r-incarnation' },
+        { label: 'Romance', value: 'romance' },
+        { label: 'School Life', value: 'school-life' },
+        { label: 'Sci-fi', value: 'sci-fi' },
+        { label: 'Seinen', value: 'seinen' },
+        { label: 'Slice of Life', value: 'slice-of-life' },
+        { label: 'Surnaturel', value: 'surnaturel' },
+        { label: 'Tragédie', value: 'trag-die' },
+        { label: 'Wuxia', value: 'wuxia' },
+        { label: 'Xianxia', value: 'xianxia' },
+        { label: 'Xuanhuan', value: 'xuanhuan' },
+        { label: 'Yaoi', value: 'yaoi' },
+      ],
+    },
+  } satisfies Filters;
+}
+
+export default new NovelFrancePlugin();

@@ -11,7 +11,7 @@ class ChireadsPlugin implements Plugin.PluginBase {
   name = 'Chireads';
   icon = 'src/fr/chireads/icon.png';
   site = 'https://chireads.com';
-  version = '1.0.2';
+  version = '1.0.3';
 
   async getCheerio(url: string): Promise<CheerioAPI> {
     const r = await fetchApi(url, {
@@ -52,23 +52,19 @@ class ChireadsPlugin implements Plugin.PluginBase {
           $ = await this.getCheerio(
             this.site + '/category/original/page/' + pageNo,
           );
-        let romans = $('.romans-content li');
-        if (!romans.length) romans = $('#content li');
-        romans.each((i, elem) => {
-          const novelName = $(elem)
-            .contents()
-            .find('div')
-            .first()
-            .text()
-            .trim();
-          const novelCover = $(elem)
-            .find('div')
-            .first()
-            .find('img')
-            .attr('src');
-          const novelUrl = $(elem).find('div').first().find('a').attr('href');
+        $('li:has(img)').each((_, elem) => {
+          const novelUrl = $(elem).find('a').first().attr('href');
+          const novelCover = $(elem).find('img').attr('src');
+          const novelName =
+            $(elem).find('h5 a').first().text().trim() ||
+            $(elem)
+              .find('a')
+              .filter((_, a) => !$(a).find('img').length)
+              .first()
+              .text()
+              .trim();
 
-          if (novelUrl) {
+          if (novelUrl && novelName) {
             novel = {
               name: novelName,
               cover: novelCover,
@@ -83,49 +79,26 @@ class ChireadsPlugin implements Plugin.PluginBase {
         .last()
         .parent()
         .next()
-        .find('li > div');
-      if (populaire.length === 12) {
-        // pc
-        let novelCover: string | undefined;
-        let novelName: string | undefined;
-        let novelUrl: string | undefined;
-        populaire.each((i, elem) => {
-          if (i % 2 === 0) novelCover = $(elem).find('img').attr('src');
-          else {
-            novelName = $(elem).text().trim();
-            novelUrl = $(elem).find('a').attr('href');
+        .find('li');
+      populaire.each((_, elem) => {
+        const novelUrl = $(elem).find('a').first().attr('href');
+        const novelCover = $(elem).find('img').attr('src');
+        const novelName = $(elem)
+          .find('a')
+          .filter((_, a) => !$(a).find('img').length)
+          .first()
+          .text()
+          .trim();
 
-            if (!novelUrl) return;
-
-            novel = {
-              name: novelName,
-              cover: novelCover || defaultCover,
-              path: novelUrl.replace(this.site, ''),
-            };
-
-            novels.push(novel);
-          }
-        });
-      } // mobile
-      else {
-        const imgs = populaire.find('div.popular-list-img img');
-        const txts = populaire.find('div.popular-list-name');
-
-        txts.each((i, elem) => {
-          const novelName = $(elem).text().trim();
-          const novelCover = $(imgs[i]).attr('src');
-          const novelUrl = $(elem).find('a').attr('href');
-
-          if (novelUrl) {
-            novel = {
-              name: novelName,
-              cover: novelCover,
-              path: novelUrl.replace(this.site, ''),
-            };
-            novels.push(novel);
-          }
-        });
-      }
+        if (novelUrl && novelName) {
+          novel = {
+            name: novelName,
+            cover: novelCover || defaultCover,
+            path: novelUrl.replace(this.site, ''),
+          };
+          novels.push(novel);
+        }
+      });
     }
     return novels;
   }
@@ -135,70 +108,63 @@ class ChireadsPlugin implements Plugin.PluginBase {
 
     const $ = await this.getCheerio(this.site + novelPath);
 
-    novel.name =
-      $('.inform-product-txt').first().text().trim() ||
-      $('.inform-title').text().trim();
+    novel.name = $('h3').first().text().trim() || 'Sans titre';
     novel.cover =
-      $('.inform-product img').attr('src') ||
-      $('.inform-product-img img').attr('src') ||
-      defaultCover;
-    novel.summary =
-      $('.inform-inform-txt').text().trim() ||
-      $('.inform-intr-txt').text().trim();
+      $('img[src*="/uploads/"]').first().attr('src') || defaultCover;
 
-    const infos =
-      $('div.inform-product-txt > div.inform-intr-col').text().trim() ||
-      $('div.inform-inform-data > h6').text().trim();
-    if (infos.includes('Auteur : '))
+    novel.summary = $('p')
+      .map((_, el) => $(el).text().trim())
+      .get()
+      .filter(t => t.length > 0)
+      .join('\n');
+
+    const infos = $('h6').text();
+    if (infos.includes('Auteur : ')) {
+      const start = infos.indexOf('Auteur : ') + 9;
+      const nextKw = infos.indexOf('Traducteur :');
+      const endKw = infos.indexOf('Statut de Parution :');
+      const end = nextKw > start ? nextKw : endKw > start ? endKw : undefined;
+      novel.author = infos.substring(start, end).trim();
+    } else if (infos.includes('Fantrad : ')) {
+      const start = infos.indexOf('Fantrad : ') + 10;
+      const endKw = infos.indexOf('Statut de Parution :');
       novel.author = infos
-        .substring(
-          infos.indexOf('Auteur : ') + 9,
-          infos.indexOf('Statut de Parution : '),
-        )
+        .substring(start, endKw > start ? endKw : undefined)
         .trim();
-    else if (infos.includes('Fantrad : '))
-      novel.author = infos
-        .substring(
-          infos.indexOf('Fantrad : ') + 10,
-          infos.indexOf('Statut de Parution : '),
-        )
-        .trim();
-    else novel.author = 'Inconnu';
-    switch (
-      infos.substring(infos.indexOf('Statut de Parution : ') + 21).toLowerCase()
-    ) {
-      case 'en pause':
-        novel.status = NovelStatus.OnHiatus;
-        break;
-      case 'complet':
+    } else {
+      novel.author = 'Inconnu';
+    }
+
+    const statusIdx = infos.indexOf('Statut de Parution : ');
+    if (statusIdx >= 0) {
+      const statusRaw = infos
+        .substring(statusIdx + 21)
+        .trim()
+        .toLowerCase();
+      if (statusRaw.includes('terminé') || statusRaw.startsWith('complet')) {
         novel.status = NovelStatus.Completed;
-        break;
-      default:
+      } else if (statusRaw.includes('pause')) {
+        novel.status = NovelStatus.OnHiatus;
+      } else {
         novel.status = NovelStatus.Ongoing;
-        break;
+      }
     }
 
     const chapters: Plugin.ChapterItem[] = [];
 
-    let chapterList = $('.chapitre-table a');
-    if (!chapterList.length) {
-      $('div.inform-annexe-list').first().remove();
-      chapterList = $('.inform-annexe-list').find('a');
-    }
-    chapterList.each((i, elem) => {
-      const chapterName = $(elem).text().trim();
+    $('a[href*="chapitre-"]').each((i, elem) => {
       const chapterUrl = $(elem).attr('href');
+      const chapterName = $(elem).text().trim();
+      if (!chapterUrl || !chapterName) return;
       const releaseDate = dayjs(
-        chapterUrl?.substring(chapterUrl.length - 11, chapterUrl.length - 1),
-      ).format('DD MMMM YYYY');
-
-      if (chapterUrl) {
-        chapters.push({
-          name: chapterName,
-          releaseTime: releaseDate,
-          path: chapterUrl.replace(this.site, ''),
-        });
-      }
+        chapterUrl.substring(chapterUrl.length - 11, chapterUrl.length - 1),
+      ).format('YYYY-MM-DD');
+      chapters.push({
+        name: chapterName,
+        releaseTime: releaseDate,
+        path: chapterUrl.replace(this.site, ''),
+        chapterNumber: i + 1,
+      });
     });
 
     novel.chapters = chapters;
@@ -209,9 +175,12 @@ class ChireadsPlugin implements Plugin.PluginBase {
   async parseChapter(chapterUrl: string): Promise<string> {
     const $ = await this.getCheerio(this.site + chapterUrl);
 
-    const chapterText = $('#content').html() || '';
-
-    return chapterText;
+    return (
+      $('.entry-content').html() ||
+      $('#content').html() ||
+      $('article').html() ||
+      ''
+    );
   }
 
   async searchNovels(
