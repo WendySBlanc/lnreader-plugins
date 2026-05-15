@@ -1,6 +1,4 @@
-import { load } from 'cheerio';
 import { fetchApi } from '@libs/fetch';
-
 import { Plugin } from '@/types/plugin';
 import { NovelStatus } from '@libs/novelStatus';
 import { Filters, FilterTypes } from '@libs/filterInputs';
@@ -18,10 +16,47 @@ type NFNovel = {
   genres: { id: string; name: string; slug: string }[];
 };
 
+type NFNovelsResponse = {
+  novels: NFNovel[];
+  total: number;
+  totalPages: number;
+  page: number;
+};
+
 type NFSearchResponse = {
   novels: NFNovel[];
   total: number;
   hasMore: boolean;
+};
+
+type NFChapter = {
+  id: string;
+  chapterNumber: number;
+  title: string;
+  slug: string;
+  createdAt: string;
+  wordCount: number;
+};
+
+type NFChaptersResponse = {
+  chapters: NFChapter[];
+  total: number;
+  hasMore: boolean;
+};
+
+type NFParagraph = {
+  id: string;
+  index: number;
+  content: string;
+  wordCount: number;
+};
+
+type NFChapterContent = {
+  id: string;
+  chapterNumber: number;
+  title: string;
+  slug: string;
+  paragraphs: NFParagraph[];
 };
 
 class NovelFrancePlugin implements Plugin.PluginBase {
@@ -29,7 +64,7 @@ class NovelFrancePlugin implements Plugin.PluginBase {
   name = 'NovelFrance';
   icon = 'src/fr/novelfrance/icon.png';
   site = 'https://novelfrance.fr';
-  version = '1.0.0';
+  version = '1.1.0';
 
   private toNovelItem(novel: NFNovel): Plugin.NovelItem {
     return {
@@ -54,31 +89,10 @@ class NovelFrancePlugin implements Plugin.PluginBase {
     const params = new URLSearchParams({ sort, page: String(pageNo) });
     if (genre && genre !== 'all') params.set('genre', genre);
 
-    const r = await fetchApi(`${this.site}/browse?${params}`);
-    const $ = load(await r.text());
-    const novels: Plugin.NovelItem[] = [];
-
-    $('a[href^="/novel/"]').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      if (/\/chapter-/.test(href)) return;
-      const img = $(el).find('img').first();
-      if (!img.length) return;
-      const title =
-        $(el).find('h3').text().trim() || img.attr('alt')?.trim() || '';
-      if (!title) return;
-      const src = img.attr('src') || img.attr('data-src') || '';
-      novels.push({
-        name: title,
-        path: href,
-        cover: src
-          ? src.startsWith('http')
-            ? src
-            : this.site + src
-          : defaultCover,
-      });
-    });
-
-    return novels;
+    const r = await fetchApi(`${this.site}/api/novels?${params}`);
+    if (!r.ok) return [];
+    const data: NFNovelsResponse = await r.json();
+    return data.novels.map(n => this.toNovelItem(n));
   }
 
   async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
@@ -107,70 +121,52 @@ class NovelFrancePlugin implements Plugin.PluginBase {
       rating: data.rating,
     };
 
-    novel.chapters = await this.fetchAllChapters(novelPath);
+    novel.chapters = await this.fetchAllChapters(slug);
     return novel;
   }
 
-  private async fetchAllChapters(
-    novelPath: string,
-  ): Promise<Plugin.ChapterItem[]> {
-    const { chapters, totalPages } = await this.fetchChapterPage(novelPath, 1);
+  private async fetchAllChapters(slug: string): Promise<Plugin.ChapterItem[]> {
+    const chapters: Plugin.ChapterItem[] = [];
+    let page = 1;
+    let hasMore = true;
 
-    if (totalPages > 1) {
-      const remaining = Array.from({ length: totalPages - 1 }, (_, i) => i + 2);
-      const pages = await Promise.all(
-        remaining.map(p => this.fetchChapterPage(novelPath, p)),
+    while (hasMore) {
+      const r = await fetchApi(
+        `${this.site}/api/chapters/${slug}?page=${page}`,
       );
-      for (const page of pages) chapters.push(...page.chapters);
+      if (!r.ok) break;
+      const data: NFChaptersResponse = await r.json();
+      for (const ch of data.chapters) {
+        chapters.push({
+          name: ch.title || `Chapitre ${ch.chapterNumber}`,
+          path: `/novel/${slug}/${ch.slug}`,
+          chapterNumber: ch.chapterNumber,
+          releaseTime: ch.createdAt,
+        });
+      }
+      hasMore = data.hasMore;
+      page++;
     }
 
     chapters.sort((a, b) => (a.chapterNumber ?? 0) - (b.chapterNumber ?? 0));
     return chapters;
   }
 
-  private async fetchChapterPage(
-    novelPath: string,
-    page: number,
-  ): Promise<{ chapters: Plugin.ChapterItem[]; totalPages: number }> {
-    const r = await fetchApi(`${this.site}${novelPath}?page=${page}`);
-    const $ = load(await r.text());
-    const chapters: Plugin.ChapterItem[] = [];
-
-    $(`a[href^="${novelPath}/chapter-"]`).each((_, el) => {
-      const href = $(el).attr('href') || '';
-      const name = $(el).text().trim();
-      if (!href || !name) return;
-      const match = href.match(/\/chapter-(\d+)/);
-      const chapterNumber = match ? parseInt(match[1]) : 0;
-      chapters.push({ name, path: href, chapterNumber });
-    });
-
-    let totalPages = 1;
-    $('a[href*="?page="]').each((_, el) => {
-      const href = $(el).attr('href') || '';
-      const m = href.match(/[?&]page=(\d+)/);
-      if (m) {
-        const p = parseInt(m[1]);
-        if (p > totalPages) totalPages = p;
-      }
-    });
-
-    return { chapters, totalPages };
-  }
-
   async parseChapter(chapterPath: string): Promise<string> {
-    const r = await fetchApi(`${this.site}${chapterPath}`);
-    const $ = load(await r.text());
+    const parts = chapterPath.split('/');
+    const novelSlug = parts[2];
+    const chapterSlug = parts[3];
 
-    $('nav, header, footer, script, style').remove();
-
-    return (
-      $('#chapter-content').html() ||
-      $('.chapter-content').html() ||
-      $('[class*="chapter-content"]').first().html() ||
-      $('article').html() ||
-      ''
+    const r = await fetchApi(
+      `${this.site}/api/chapters/${novelSlug}/${chapterSlug}`,
     );
+    if (!r.ok) throw new Error('Impossible de charger le chapitre');
+    const data: NFChapterContent = await r.json();
+
+    return data.paragraphs
+      .sort((a, b) => a.index - b.index)
+      .map(p => `<p>${p.content}</p>`)
+      .join('\n');
   }
 
   async searchNovels(
