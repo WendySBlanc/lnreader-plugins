@@ -65,7 +65,7 @@ class NovelFrancePlugin implements Plugin.PluginBase {
   name = 'NovelFrance';
   icon = 'src/fr/novelfrance/icon.png';
   site = 'https://novelfrance.fr';
-  version = '3.0.0';
+  version = '3.1.0';
 
   private readonly pageSize = 100;
 
@@ -171,22 +171,16 @@ class NovelFrancePlugin implements Plugin.PluginBase {
       })
       .sort((a, b) => a.chapterNumber - b.chapterNumber);
 
-    return sorted.map((ch, index) => this.toChapterItem(slug, ch, index === 0));
+    return sorted.map(ch => this.toChapterItem(slug, ch));
   }
 
-  private toChapterItem(
-    slug: string,
-    ch: NFChapter,
-    isFirst: boolean,
-  ): Plugin.ChapterItem {
-    const displayNumber = ch.chapterNumber + 1;
-    const fallbackName = isFirst
-      ? `Chapitre 1 (Prologue)`
-      : `Chapitre ${displayNumber}`;
+  private toChapterItem(slug: string, ch: NFChapter): Plugin.ChapterItem {
+    const num = ch.chapterNumber + 1;
+    const title = ch.title?.trim();
     return {
-      name: ch.title || fallbackName,
+      name: title ? `${num} - ${title}` : `Chapitre ${num}`,
       path: `/novel/${slug}/${ch.slug}`,
-      chapterNumber: displayNumber,
+      chapterNumber: num,
       releaseTime: ch.createdAt,
     };
   }
