@@ -60,14 +60,14 @@ type NFChapterContent = {
   paragraphs: NFParagraph[];
 };
 
-class NovelFrancePlugin implements Plugin.PagePlugin {
+class NovelFrancePlugin implements Plugin.PluginBase {
   id = 'novelfrance';
   name = 'NovelFrance';
   icon = 'src/fr/novelfrance/icon.png';
   site = 'https://novelfrance.fr';
-  version = '4.1.0';
+  version = '5.0.0';
 
-  private readonly pageSize = 50;
+  private readonly pageSize = 100;
 
   private toNovelItem(novel: NFNovel): Plugin.NovelItem {
     return {
@@ -98,9 +98,7 @@ class NovelFrancePlugin implements Plugin.PagePlugin {
     return data.novels.map(n => this.toNovelItem(n));
   }
 
-  async parseNovel(
-    novelPath: string,
-  ): Promise<Plugin.SourceNovel & { totalPages: number }> {
+  async parseNovel(novelPath: string): Promise<Plugin.SourceNovel> {
     const slug = novelPath.replace('/novel/', '');
 
     const apiRes = await fetchApi(`${this.site}/api/novels/${slug}`);
@@ -109,13 +107,6 @@ class NovelFrancePlugin implements Plugin.PagePlugin {
 
     let author = data.author || '';
     if (data.translatorName) author += ` (Trad. ${data.translatorName})`;
-
-    const firstPage = await this.fetchChapterPage(slug, 0, this.pageSize);
-    const total = firstPage?.total ?? 0;
-    const totalPages = Math.max(1, Math.ceil(total / this.pageSize));
-    const chapters = firstPage
-      ? firstPage.chapters.map(ch => this.toChapterItem(slug, ch, '1'))
-      : [];
 
     return {
       path: novelPath,
@@ -131,19 +122,7 @@ class NovelFrancePlugin implements Plugin.PagePlugin {
             : NovelStatus.Unknown,
       genres: data.genres.map(g => g.name).join(', '),
       rating: data.rating,
-      totalPages,
-      chapters,
-    };
-  }
-
-  async parsePage(novelPath: string, page: string): Promise<Plugin.SourcePage> {
-    const slug = novelPath.replace('/novel/', '');
-    const pageNum = parseInt(page, 10) || 1;
-    const skip = (pageNum - 1) * this.pageSize;
-    const data = await this.fetchChapterPage(slug, skip, this.pageSize);
-    if (!data) return { chapters: [] };
-    return {
-      chapters: data.chapters.map(ch => this.toChapterItem(slug, ch, page)),
+      chapters: await this.fetchAllChapters(slug),
     };
   }
 
@@ -163,11 +142,38 @@ class NovelFrancePlugin implements Plugin.PagePlugin {
     }
   }
 
-  private toChapterItem(
-    slug: string,
-    ch: NFChapter,
-    page: string,
-  ): Plugin.ChapterItem {
+  private async fetchAllChapters(slug: string): Promise<Plugin.ChapterItem[]> {
+    const first = await this.fetchChapterPage(slug, 0, this.pageSize);
+    if (!first) return [];
+
+    const allRaw: NFChapter[] = [...first.chapters];
+
+    if (first.hasMore) {
+      const skips: number[] = [];
+      for (let s = this.pageSize; s < first.total; s += this.pageSize) {
+        skips.push(s);
+      }
+      const results = await Promise.all(
+        skips.map(s => this.fetchChapterPage(slug, s, this.pageSize)),
+      );
+      for (const data of results) {
+        if (data) allRaw.push(...data.chapters);
+      }
+    }
+
+    const seenPaths = new Set<string>();
+    return allRaw
+      .filter(ch => {
+        const path = `/novel/${slug}/${ch.slug}`;
+        if (seenPaths.has(path)) return false;
+        seenPaths.add(path);
+        return true;
+      })
+      .sort((a, b) => a.chapterNumber - b.chapterNumber)
+      .map(ch => this.toChapterItem(slug, ch));
+  }
+
+  private toChapterItem(slug: string, ch: NFChapter): Plugin.ChapterItem {
     const num = ch.chapterNumber;
     const title = ch.title?.trim();
     return {
@@ -175,7 +181,6 @@ class NovelFrancePlugin implements Plugin.PagePlugin {
       path: `/novel/${slug}/${ch.slug}`,
       chapterNumber: num,
       releaseTime: ch.createdAt,
-      page,
     };
   }
 
