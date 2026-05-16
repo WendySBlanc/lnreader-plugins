@@ -65,7 +65,7 @@ class NovelFrancePlugin implements Plugin.PagePlugin {
   name = 'NovelFrance';
   icon = 'src/fr/novelfrance/icon.png';
   site = 'https://novelfrance.fr';
-  version = '4.0.0';
+  version = '4.1.0';
 
   private readonly pageSize = 50;
 
@@ -168,7 +168,7 @@ class NovelFrancePlugin implements Plugin.PagePlugin {
     ch: NFChapter,
     page: string,
   ): Plugin.ChapterItem {
-    const num = ch.chapterNumber + 1;
+    const num = ch.chapterNumber;
     const title = ch.title?.trim();
     return {
       name: title ? `${num} - ${title}` : `Chapitre ${num}`,
